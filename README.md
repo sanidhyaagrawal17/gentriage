@@ -1,3 +1,38 @@
+# GenTriage
+
+GenTriage — a demo APK triage platform (dashboard, gateway, and workers).
+
+Quick start (development):
+
+1. Start required services (Kafka, Mongo, etc) via Docker Compose:
+
+```powershell
+cd deployments
+docker compose up -d
+```
+
+2. Run the API gateway (if developing locally):
+
+```powershell
+cd go-services
+go run ./cmd/api-gateway
+```
+
+3. Start the frontend dev server:
+
+```powershell
+cd frontend
+npm.cmd install
+npm.cmd run dev
+```
+
+4. Start workers (optional):
+
+```powershell
+python -u python-workers/simulator/sim_analyzer.py
+```
+
+This repository is a work-in-progress demo. See `go-services/cmd/api-gateway/main.go` and `frontend/src/pages/Dashboard.jsx` for recent frontend/backend upload progress work.
 # GenTriage — Local dev notes
 
 This workspace contains a demo pipeline (API gateway, Kafka, workers, frontend) for APK triage.
