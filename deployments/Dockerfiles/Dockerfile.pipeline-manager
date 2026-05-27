@@ -1,0 +1,15 @@
+FROM golang:1.23-alpine AS builder
+
+WORKDIR /app
+COPY go-services/go.mod ./
+RUN go mod tidy
+
+COPY go-services/ ./
+RUN CGO_ENABLED=0 GOOS=linux go build -o /pipeline-manager ./cmd/pipeline-manager
+
+FROM alpine:latest
+WORKDIR /app
+# This is the missing link! It moves the binary from Stage 1 into the final image.
+COPY --from=builder /pipeline-manager /pipeline-manager
+
+ENTRYPOINT ["/pipeline-manager"]

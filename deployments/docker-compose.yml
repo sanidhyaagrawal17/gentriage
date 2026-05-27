@@ -1,0 +1,179 @@
+services:
+  # ----------------------------------------
+  # Message Broker: Apache Kafka (KRaft mode)
+  # ----------------------------------------
+  kafka:
+    image: bitnamilegacy/kafka:latest
+    container_name: gentriage-kafka
+    ports:
+      - "9092:9092"
+      - "9094:9094"
+    environment:
+      # Running Kafka in KRaft mode (no Zookeeper required)
+      - KAFKA_CFG_NODE_ID=1
+      - KAFKA_CFG_PROCESS_ROLES=controller,broker
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,PLAINTEXT_HOST://:9094,CONTROLLER://:9093
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9094
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@localhost:9093
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - ALLOW_PLAINTEXT_LISTENER=yes
+    volumes:
+      - kafka_data:/bitnami/kafka
+    networks:
+      - gentriage-net
+
+  # ----------------------------------------
+  # Standard Database: MongoDB
+  # ----------------------------------------
+  mongodb:
+    image: mongo:latest
+    container_name: gentriage-mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=admin
+      - MONGO_INITDB_ROOT_PASSWORD=password
+      - MONGO_INITDB_DATABASE=gentriage
+    volumes:
+      # Mapping to the data/mongo folder created in the root directory
+      - ../data/mongo:/data/db
+    networks:
+      - gentriage-net
+
+  # ----------------------------------------
+  # Development Mongo (no-auth) - for local dev & migrations
+  # Exposes on host port 27018 to avoid colliding with production mongo
+  mongodb-dev:
+    image: mongo:latest
+    container_name: gentriage-mongodb-dev
+    command: ["mongod", "--bind_ip_all", "--noauth"]
+    ports:
+      - "27117:27017"
+    volumes:
+      - ../data/mongo-dev:/data/db
+    networks:
+      - gentriage-net
+
+  # ----------------------------------------
+  # Vector Database: ChromaDB
+  # ----------------------------------------
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: gentriage-chromadb
+    ports:
+      - "8000:8000"
+    environment:
+      - IS_PERSISTENT=TRUE
+    volumes:
+      # Mapping to the data/chroma folder created in the root directory
+      - ../data/chroma:/chroma/chroma
+    networks:
+      - gentriage-net
+
+  # ----------------------------------------
+  # Local LLM: Ollama
+  # ----------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: gentriage-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - gentriage-net
+
+  api-gateway:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfiles/Dockerfile.api-gateway
+    container_name: gentriage-api-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      - GENTRIAGE_KAFKA_BROKER=kafka:9092
+      # For local development the gateway defaults to the dev mongo (no-auth) service.
+      - GENTRIAGE_MONGO_URI=mongodb://mongodb-dev:27017
+    volumes:
+      - ../data/apks:/data/apks
+    depends_on:
+      - mongodb-dev
+    networks:
+      - gentriage-net
+
+  pipeline-manager:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfiles/Dockerfile.pipeline-manager
+    container_name: gentriage-pipeline-manager
+    environment:
+      - GENTRIAGE_KAFKA_BROKER=kafka:9092
+    depends_on:
+      - kafka
+    networks:
+      - gentriage-net
+
+  triage-worker:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfiles/Dockerfile.triage-worker
+    container_name: gentriage-triage-worker
+    environment:
+      - GENTRIAGE_KAFKA_BROKER=kafka:9092
+    depends_on:
+      - kafka
+    networks:
+      - gentriage-net
+
+  analyzer-worker:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfiles/Dockerfile.analyzer-worker
+    container_name: gentriage-analyzer-worker
+    environment:
+      - GENTRIAGE_KAFKA_BROKER=kafka:9092
+    depends_on:
+      - kafka
+    networks:
+      - gentriage-net
+
+  genai-worker:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfiles/Dockerfile.genai-worker
+    container_name: gentriage-genai-worker
+    environment:
+      - GENTRIAGE_KAFKA_BROKER=kafka:9092
+      - GENTRIAGE_OLLAMA_URL=http://ollama:11434/api/generate
+      - GENTRIAGE_GENAI_CONSUME=analysis_complete
+      - GENTRIAGE_GENAI_PRODUCE=analysis_enriched
+    depends_on:
+      - kafka
+      - ollama
+    networks:
+      - gentriage-net
+
+  reporter:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfiles/Dockerfile.reporter
+    container_name: gentriage-reporter
+    environment:
+      - GENTRIAGE_KAFKA_BROKER=kafka:9092
+      - GENTRIAGE_MONGO_URI=mongodb://admin:password@mongodb:27017
+      - GENTRIAGE_CONSUME_TOPIC=analysis_enriched
+    depends_on:
+      - kafka
+      - mongodb
+      - ollama
+    networks:
+      - gentriage-net
+
+networks:
+  gentriage-net:
+    driver: bridge
+
+volumes:
+  kafka_data:
+  ollama_data:

@@ -1,0 +1,17 @@
+# Binaries 
+go-services/bin/ 
+ 
+# Data volumes 
+data/apks/* 
+data/mongo/* 
+data/chroma/* 
+!data/apks/.gitkeep 
+!data/mongo/.gitkeep 
+!data/chroma/.gitkeep 
+ 
+# Environment variables 
+.env 
+ 
+# Python 
+__pycache__/ 
+*.pyc 

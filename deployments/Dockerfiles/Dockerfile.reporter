@@ -1,0 +1,18 @@
+FROM golang:1.23-alpine AS builder
+
+RUN apk add --no-cache git
+
+WORKDIR /app
+COPY go-services/ ./
+
+# Force Go to fetch the newest valid MongoDB driver, bypassing the broken v1.12.3 revision
+RUN go get go.mongodb.org/mongo-driver/mongo@latest
+RUN go mod tidy
+
+RUN CGO_ENABLED=0 GOOS=linux go build -o /reporter ./cmd/reporter
+
+FROM alpine:latest
+WORKDIR /app
+COPY --from=builder /reporter /reporter
+
+ENTRYPOINT ["/reporter"]

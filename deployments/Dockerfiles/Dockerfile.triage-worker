@@ -1,0 +1,8 @@
+FROM python:3.11-slim
+WORKDIR /app
+COPY python-workers/triage-xgboost/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+COPY python-workers/triage-xgboost ./triage-xgboost
+WORKDIR /app/triage-xgboost
+RUN python train_model_if_data.py || true
+CMD ["python", "main.py"]
