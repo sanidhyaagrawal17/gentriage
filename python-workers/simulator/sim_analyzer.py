@@ -31,12 +31,14 @@ def run():
     consumer = KafkaConsumer(
         *CONSUME_TOPICS,
         bootstrap_servers=[KAFKA_BROKER],
+        api_version=(3, 5),
         auto_offset_reset="earliest",
         enable_auto_commit=True,
         value_deserializer=lambda m: json.loads(m.decode("utf-8")),
     )
     producer = KafkaProducer(
         bootstrap_servers=[KAFKA_BROKER],
+        api_version=(3, 5),
         value_serializer=lambda v: json.dumps(v).encode("utf-8"),
     )
 

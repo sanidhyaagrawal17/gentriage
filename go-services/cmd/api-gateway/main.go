@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,6 +40,30 @@ type Task struct {
 	Status    string    `json:"status" bson:"status"`
 	CreatedAt time.Time `json:"created_at" bson:"created_at"`
 	UpdatedAt time.Time `json:"updated_at" bson:"updated_at"`
+}
+
+// Upload progress record (tracked server-side)
+type UploadProgress struct {
+	Total   int64 `json:"total"`
+	Written int64 `json:"written"`
+}
+
+// countingWriter updates a sync.Map progress store while writing to destination
+type countingWriter struct {
+	TaskID        string
+	Dst           io.Writer
+	ProgressStore *sync.Map
+}
+
+func (cw *countingWriter) Write(p []byte) (int, error) {
+	n, err := cw.Dst.Write(p)
+	if n > 0 {
+		v, _ := cw.ProgressStore.LoadOrStore(cw.TaskID, UploadProgress{Total: 0, Written: 0})
+		prev := v.(UploadProgress)
+		prev.Written += int64(n)
+		cw.ProgressStore.Store(cw.TaskID, prev)
+	}
+	return n, err
 }
 
 
@@ -180,6 +206,8 @@ func main() {
 
 	// Note: MongoDB support optional; currently using file-backed tasks.json
 
+	var uploadProgress sync.Map // map[string]UploadProgress
+
 	enableCors := func(w *http.ResponseWriter) {
 		(*w).Header().Set("Access-Control-Allow-Origin", "*")
 		(*w).Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -198,40 +226,68 @@ func main() {
 			return
 		}
 
-		if err := r.ParseMultipartForm(100 << 20); err != nil {
-			http.Error(w, "Failed to parse form. File too large.", http.StatusBadRequest)
-			return
-		}
-
-		file, handler, err := r.FormFile("apk")
+		// Support optional task_id query parameter so clients can poll server-side progress
+		taskID := r.URL.Query().Get("task_id")
+		// Use multipart streaming to copy file and update progress
+		mr, err := r.MultipartReader()
 		if err != nil {
-			http.Error(w, "Missing 'apk' file in form data", http.StatusBadRequest)
+			http.Error(w, "Failed to parse multipart data", http.StatusBadRequest)
 			return
 		}
-		defer file.Close()
 
-		taskID := uuid.New().String()
-		safeFileName := fmt.Sprintf("%s_%s", taskID, filepath.Base(handler.Filename))
-		filePath := filepath.Join(uploadDir, safeFileName)
-
-		dst, err := os.Create(filePath)
-		if err != nil {
-			log.Printf("Failed to create file: %v", err)
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
-			return
+		if taskID == "" {
+			taskID = uuid.New().String()
 		}
-		defer dst.Close()
 
-		if _, err := io.Copy(dst, file); err != nil {
-			log.Printf("Failed to save file: %v", err)
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
-			return
+		// initialize progress record if content length available
+		total := r.ContentLength
+		uploadProgress.Store(taskID, UploadProgress{Total: total, Written: 0})
+
+		var savedFilePath string
+		var savedFileName string
+		// iterate parts
+		for {
+			part, perr := mr.NextPart()
+			if perr == io.EOF {
+				break
+			}
+			if perr != nil {
+				log.Printf("multipart next part error: %v", perr)
+				break
+			}
+			if part.FormName() != "apk" {
+				// consume and ignore other fields
+				io.Copy(io.Discard, part)
+				part.Close()
+				continue
+			}
+
+			savedFileName = filepath.Base(part.FileName())
+			safeFileName := fmt.Sprintf("%s_%s", taskID, savedFileName)
+			savedFilePath = filepath.Join(uploadDir, safeFileName)
+			dst, derr := os.Create(savedFilePath)
+			if derr != nil {
+				log.Printf("Failed to create file: %v", derr)
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+				return
+			}
+
+			// counting writer updates progress map
+			cw := &countingWriter{TaskID: taskID, Dst: dst, ProgressStore: &uploadProgress}
+			if _, err := io.Copy(cw, part); err != nil {
+				log.Printf("Failed to save file: %v", err)
+				dst.Close()
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+				return
+			}
+			dst.Close()
+			part.Close()
 		}
 
 		event := APKUploadEvent{
 			TaskID:    taskID,
-			FilePath:  filePath,
-			FileName:  handler.Filename,
+			FilePath:  savedFilePath,
+			FileName:  savedFileName,
 			Timestamp: time.Now(),
 		}
 
@@ -259,8 +315,8 @@ func main() {
 		// persist basic task metadata so the frontend can list tasks
 		task := Task{
 			TaskID:    taskID,
-			FileName:  handler.Filename,
-			FilePath:  filePath,
+			FileName:  savedFileName,
+			FilePath:  savedFilePath,
 			Status:    "queued",
 			CreatedAt: time.Now(),
 			UpdatedAt: time.Now(),
@@ -269,7 +325,7 @@ func main() {
 			log.Printf("Failed to persist task: %v", err)
 		}
 
-		log.Printf("Task %s queued successfully for file %s", taskID, handler.Filename)
+		log.Printf("Task %s queued successfully for file %s", taskID, savedFileName)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
@@ -279,6 +335,44 @@ func main() {
 			"message": "APK successfully uploaded and queued for GenTriage analysis.",
 		}
 		json.NewEncoder(w).Encode(response)
+	})
+
+	// Initialize an upload session: client calls this to receive a task_id before uploading
+	http.HandleFunc("/api/v1/upload/init", func(w http.ResponseWriter, r *http.Request) {
+		enableCors(&w)
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		id := uuid.New().String()
+		uploadProgress.Store(id, UploadProgress{Total: 0, Written: 0})
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"task_id": id})
+	})
+
+	// GET upload progress: /api/v1/upload/progress?task_id=...
+	http.HandleFunc("/api/v1/upload/progress", func(w http.ResponseWriter, r *http.Request) {
+		enableCors(&w)
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		id := r.URL.Query().Get("task_id")
+		if id == "" {
+			http.Error(w, "Missing task_id", http.StatusBadRequest)
+			return
+		}
+		v, ok := uploadProgress.Load(id)
+		if !ok {
+			// return zero progress if not found
+			json.NewEncoder(w).Encode(map[string]int64{"total": 0, "written": 0})
+			return
+		}
+		json.NewEncoder(w).Encode(v)
 	})
 
 	http.HandleFunc("/api/v1/tasks", func(w http.ResponseWriter, r *http.Request) {
