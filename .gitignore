@@ -1,4 +1,18 @@
-# Binaries 
+node_modules/
+frontend/node_modules/
+frontend/dist/
+data/
+data/*
+!.gitkeep
+*.log
+*.env
+.env.local
+/.idea
+.vscode
+*.exe
+*.wt
+__pycache__/
+.DS_Store# Binaries 
 go-services/bin/ 
  
 # Data volumes 
